@@ -7,8 +7,10 @@ import android.content.Context;
 import android.content.res.TypedArray;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcel;
@@ -20,6 +22,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.ViewTreeObserver;
+import android.view.animation.AccelerateInterpolator;
 import android.view.animation.Interpolator;
 
 public abstract class MenuDrawer extends ViewGroup {
@@ -63,6 +66,12 @@ public abstract class MenuDrawer extends ViewGroup {
          * @return true if view is draggable by delta dx.
          */
         boolean isViewDraggable(View v, int dx, int x, int y);
+    }
+
+    public enum Type {
+        BEHIND,
+        STATIC,
+        OVERLAY,
     }
 
     /**
@@ -161,6 +170,11 @@ public abstract class MenuDrawer extends ViewGroup {
     protected static final Interpolator SMOOTH_INTERPOLATOR = new SmoothInterpolator();
 
     /**
+     * Interpolator used for stretching/retracting the active indicator.
+     */
+    protected static final Interpolator INDICATOR_INTERPOLATOR = new AccelerateInterpolator();
+
+    /**
      * Drawable used as menu overlay.
      */
     protected Drawable mMenuOverlay;
@@ -169,6 +183,8 @@ public abstract class MenuDrawer extends ViewGroup {
      * Defines whether the drop shadow is enabled.
      */
     protected boolean mDropShadowEnabled;
+
+    protected int mDropShadowColor;
 
     /**
      * Drawable used as content drop shadow onto the menu.
@@ -350,6 +366,27 @@ public abstract class MenuDrawer extends ViewGroup {
     private int mDrawerClosedContentDesc;
 
     /**
+     * The position of the drawer.
+     */
+    protected Position mPosition;
+
+    private final Rect mIndicatorClipRect = new Rect();
+
+    protected boolean mIsStatic;
+
+    protected final Rect mDropShadowRect = new Rect();
+
+    /**
+     * Current offset.
+     */
+    protected float mOffsetPixels;
+
+    /**
+     * Whether an overlay should be drawn as the drawer is opened and closed.
+     */
+    protected boolean mDrawOverlay;
+
+    /**
      * Attaches the MenuDrawer to the Activity.
      *
      * @param activity The activity that the MenuDrawer will be attached to.
@@ -392,21 +429,21 @@ public abstract class MenuDrawer extends ViewGroup {
      * @return The created MenuDrawer instance.
      */
     public static MenuDrawer attach(Activity activity, int dragMode, Position position) {
-        return attach(activity, dragMode, position, false);
+        return attach(activity, dragMode, position, Type.BEHIND);
     }
 
     /**
      * Attaches the MenuDrawer to the Activity.
      *
-     * @param activity     The activity the menu drawer will be attached to.
-     * @param dragMode     The drag mode of the drawer. Can be either {@link MenuDrawer#MENU_DRAG_CONTENT}
-     *                     or {@link MenuDrawer#MENU_DRAG_WINDOW}.
-     * @param position     Where to position the menu.
-     * @param attachStatic Whether a static (non-draggable, always visible) drawer should be used.
+     * @param activity The activity the menu drawer will be attached to.
+     * @param dragMode The drag mode of the drawer. Can be either {@link MenuDrawer#MENU_DRAG_CONTENT}
+     *                 or {@link MenuDrawer#MENU_DRAG_WINDOW}.
+     * @param position Where to position the menu.
+     * @param type     The {@link Type} of the drawer.
      * @return The created MenuDrawer instance.
      */
-    public static MenuDrawer attach(Activity activity, int dragMode, Position position, boolean attachStatic) {
-        MenuDrawer menuDrawer = createMenuDrawer(activity, dragMode, position, attachStatic);
+    public static MenuDrawer attach(Activity activity, int dragMode, Position position, Type type) {
+        MenuDrawer menuDrawer = createMenuDrawer(activity, dragMode, position, type);
         menuDrawer.setId(R.id.md__drawer);
 
         switch (dragMode) {
@@ -428,37 +465,29 @@ public abstract class MenuDrawer extends ViewGroup {
     /**
      * Constructs the appropriate MenuDrawer based on the position.
      */
-    private static MenuDrawer createMenuDrawer(Activity activity, int dragMode, Position position,
-            boolean attachStatic) {
-        if (attachStatic) {
-            switch (position) {
-                case LEFT:
-                    return new LeftStaticDrawer(activity, dragMode);
-                case RIGHT:
-                    return new RightStaticDrawer(activity, dragMode);
-                case TOP:
-                    return new TopStaticDrawer(activity, dragMode);
-                case BOTTOM:
-                    return new BottomStaticDrawer(activity, dragMode);
-                default:
-                    throw new IllegalArgumentException("position must be one of LEFT, TOP, RIGHT or BOTTOM");
+    private static MenuDrawer createMenuDrawer(Activity activity, int dragMode, Position position, Type type) {
+        MenuDrawer drawer;
+
+        if (type == Type.STATIC) {
+            drawer = new StaticDrawer(activity);
+
+        } else if (type == Type.OVERLAY) {
+            drawer = new OverlayDrawer(activity, dragMode);
+            if (position == Position.LEFT) {
+                drawer.setupUpIndicator(activity);
+            }
+
+        } else {
+            drawer = new SlidingDrawer(activity, dragMode);
+            if (position == Position.LEFT) {
+                drawer.setupUpIndicator(activity);
             }
         }
 
-        switch (position) {
-            case LEFT:
-                MenuDrawer drawer = new LeftDrawer(activity, dragMode);
-                drawer.setupUpIndicator(activity);
-                return drawer;
-            case RIGHT:
-                return new RightDrawer(activity, dragMode);
-            case TOP:
-                return new TopDrawer(activity, dragMode);
-            case BOTTOM:
-                return new BottomDrawer(activity, dragMode);
-            default:
-                throw new IllegalArgumentException("position must be one of LEFT, TOP, RIGHT or BOTTOM");
-        }
+        drawer.mDragMode = dragMode;
+        drawer.mPosition = position;
+
+        return drawer;
     }
 
     /**
@@ -531,8 +560,7 @@ public abstract class MenuDrawer extends ViewGroup {
         mDropShadowDrawable = a.getDrawable(R.styleable.MenuDrawer_mdDropShadow);
 
         if (mDropShadowDrawable == null) {
-            final int dropShadowColor = a.getColor(R.styleable.MenuDrawer_mdDropShadowColor, 0xFF000000);
-            setDropShadowColor(dropShadowColor);
+            mDropShadowColor = a.getColor(R.styleable.MenuDrawer_mdDropShadowColor, 0xFF000000);
         }
 
         mDropShadowSize = a.getDimensionPixelSize(R.styleable.MenuDrawer_mdDropShadowSize,
@@ -551,42 +579,44 @@ public abstract class MenuDrawer extends ViewGroup {
         }
 
         mDrawerOpenContentDesc = a.getResourceId(R.styleable.MenuDrawer_mdDrawerOpenUpContentDescription, 0);
-
         mDrawerClosedContentDesc = a.getResourceId(R.styleable.MenuDrawer_mdDrawerClosedUpContentDescription, 0);
+
+        mDrawOverlay = a.getBoolean(R.styleable.MenuDrawer_mdDrawOverlay, true);
+
+        final int position = a.getInt(R.styleable.MenuDrawer_mdPosition, 0);
+        mPosition = Position.fromValue(position);
 
         a.recycle();
 
         mMenuContainer = new BuildLayerFrameLayout(context);
         mMenuContainer.setId(R.id.md__menu);
         mMenuContainer.setBackgroundDrawable(menuBackground);
-        super.addView(mMenuContainer, -1, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
         mContentContainer = new NoClickThroughFrameLayout(context);
         mContentContainer.setId(R.id.md__content);
         mContentContainer.setBackgroundDrawable(contentBackground);
-        super.addView(mContentContainer, -1, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
         mMenuOverlay = new ColorDrawable(0xFF000000);
 
         mIndicatorScroller = new FloatScroller(SMOOTH_INTERPOLATOR);
     }
 
-    @Override
-    public void addView(View child, int index, LayoutParams params) {
-        int childCount = mMenuContainer.getChildCount();
-        if (childCount == 0) {
-            mMenuContainer.addView(child, index, params);
-            return;
-        }
-
-        childCount = mContentContainer.getChildCount();
-        if (childCount == 0) {
-            mContentContainer.addView(child, index, params);
-            return;
-        }
-
-        throw new IllegalStateException("MenuDrawer can only hold two child views");
-    }
+    //    @Override
+    //    public void addView(View child, int index, LayoutParams params) {
+    //        int childCount = mMenuContainer.getChildCount();
+    //        if (childCount == 0) {
+    //            mMenuContainer.addView(child, index, params);
+    //            return;
+    //        }
+    //
+    //        childCount = mContentContainer.getChildCount();
+    //        if (childCount == 0) {
+    //            mContentContainer.addView(child, index, params);
+    //            return;
+    //        }
+    //
+    //        throw new IllegalStateException("MenuDrawer can only hold two child views");
+    //    }
 
     protected int dpToPx(int dp) {
         return (int) (getResources().getDisplayMetrics().density * dp + 0.5f);
@@ -615,6 +645,185 @@ public abstract class MenuDrawer extends ViewGroup {
     protected void onDetachedFromWindow() {
         getViewTreeObserver().removeOnScrollChangedListener(mScrollListener);
         super.onDetachedFromWindow();
+    }
+
+    private boolean shouldDrawIndicator() {
+        return mActiveView != null && mActiveIndicator != null && isViewDescendant(mActiveView);
+    }
+
+    @Override
+    protected void dispatchDraw(Canvas canvas) {
+        super.dispatchDraw(canvas);
+        final int offsetPixels = (int) mOffsetPixels;
+
+        if (mDrawOverlay && offsetPixels != 0) {
+            drawOverlay(canvas);
+        }
+        if (mDropShadowEnabled && offsetPixels != 0) {
+            drawDropShadow(canvas);
+        }
+        if (shouldDrawIndicator() && offsetPixels != 0) {
+            drawIndicator(canvas);
+        }
+    }
+
+    protected abstract void drawOverlay(Canvas canvas);
+
+    private void drawDropShadow(Canvas canvas) {
+        // Can't pass the position to the constructor, so wait with loading the drawable until the drop shadow is
+        // actually drawn.
+        if (mDropShadowDrawable == null) {
+            setDropShadowColor(mDropShadowColor);
+        }
+
+        updateDropShadowRect();
+        mDropShadowDrawable.setBounds(mDropShadowRect);
+        mDropShadowDrawable.draw(canvas);
+    }
+
+    protected void updateDropShadowRect() {
+        // This updates the rect for the static and sliding drawer. The overlay drawer has its own implementation.
+        switch (mPosition) {
+            case LEFT:
+                mDropShadowRect.top = 0;
+                mDropShadowRect.bottom = getHeight();
+                mDropShadowRect.right = ViewHelper.getLeft(mContentContainer);
+                mDropShadowRect.left = mDropShadowRect.right - mDropShadowSize;
+                break;
+
+            case TOP:
+                mDropShadowRect.left = 0;
+                mDropShadowRect.right = getWidth();
+                mDropShadowRect.bottom = ViewHelper.getTop(mContentContainer);
+                mDropShadowRect.top = mDropShadowRect.bottom - mDropShadowSize;
+                break;
+
+            case RIGHT:
+                mDropShadowRect.top = 0;
+                mDropShadowRect.bottom = getHeight();
+                mDropShadowRect.left = ViewHelper.getRight(mContentContainer);
+                mDropShadowRect.right = mDropShadowRect.left + mDropShadowSize;
+                break;
+
+            case BOTTOM:
+                mDropShadowRect.left = 0;
+                mDropShadowRect.right = getWidth();
+                mDropShadowRect.top = ViewHelper.getBottom(mContentContainer);
+                mDropShadowRect.bottom = mDropShadowRect.top + mDropShadowSize;
+                break;
+        }
+    }
+
+    private void drawIndicator(Canvas canvas) {
+        Integer position = (Integer) mActiveView.getTag(R.id.mdActiveViewPosition);
+        final int pos = position == null ? 0 : position;
+        if (pos == mActivePosition) {
+            updateIndicatorClipRect();
+            canvas.save();
+            canvas.clipRect(mIndicatorClipRect);
+
+            int drawLeft = 0;
+            int drawTop = 0;
+            switch (mPosition) {
+                case LEFT:
+                case TOP:
+                    drawLeft = mIndicatorClipRect.left;
+                    drawTop = mIndicatorClipRect.top;
+                    break;
+
+                case RIGHT:
+                    drawLeft = mIndicatorClipRect.right - mActiveIndicator.getWidth();
+                    drawTop = mIndicatorClipRect.top;
+                    break;
+
+                case BOTTOM:
+                    drawLeft = mIndicatorClipRect.left;
+                    drawTop = mIndicatorClipRect.bottom - mActiveIndicator.getHeight();
+            }
+
+            canvas.drawBitmap(mActiveIndicator, drawLeft, drawTop, null);
+            canvas.restore();
+        }
+    }
+
+    /**
+     * Update the {@link Rect} where the indicator is drawn.
+     */
+    protected void updateIndicatorClipRect() {
+        mActiveView.getDrawingRect(mActiveRect);
+        offsetDescendantRectToMyCoords(mActiveView, mActiveRect);
+
+        final float openRatio = mIsStatic ? 1.0f : Math.abs(mOffsetPixels) / mMenuSize;
+
+        final float interpolatedRatio = 1.f - INDICATOR_INTERPOLATOR.getInterpolation((1.f - openRatio));
+
+        final int indicatorWidth = mActiveIndicator.getWidth();
+        final int indicatorHeight = mActiveIndicator.getHeight();
+
+        final int interpolatedWidth = (int) (indicatorWidth * interpolatedRatio);
+        final int interpolatedHeight = (int) (indicatorHeight * interpolatedRatio);
+
+        final int startPos = mIndicatorStartPos;
+
+        int left = 0;
+        int top = 0;
+        int right = 0;
+        int bottom = 0;
+
+        switch (mPosition) {
+            case LEFT:
+            case RIGHT:
+                final int finalTop = mActiveRect.top + ((mActiveRect.height() - indicatorHeight) / 2);
+                if (mIndicatorAnimating) {
+                    top = (int) (startPos + ((finalTop - startPos) * mIndicatorOffset));
+                } else {
+                    top = finalTop;
+                }
+                bottom = top + indicatorHeight;
+                break;
+
+            case TOP:
+            case BOTTOM:
+                final int finalLeft = mActiveRect.left + ((mActiveRect.width() - indicatorWidth) / 2);
+                if (mIndicatorAnimating) {
+                    left = (int) (startPos + ((finalLeft - startPos) * mIndicatorOffset));
+                } else {
+                    left = finalLeft;
+                }
+                right = left + indicatorWidth;
+                break;
+        }
+
+        switch (mPosition) {
+            case LEFT: {
+                right = ViewHelper.getLeft(mContentContainer);
+                left = right - interpolatedWidth;
+                break;
+            }
+
+            case TOP: {
+                bottom = ViewHelper.getTop(mContentContainer);
+                top = bottom - interpolatedHeight;
+                break;
+            }
+
+            case RIGHT: {
+                left = ViewHelper.getRight(mContentContainer);
+                right = left + interpolatedWidth;
+                break;
+            }
+
+            case BOTTOM: {
+                top = ViewHelper.getBottom(mContentContainer);
+                bottom = top + interpolatedHeight;
+                break;
+            }
+        }
+
+        mIndicatorClipRect.left = left;
+        mIndicatorClipRect.top = top;
+        mIndicatorClipRect.right = right;
+        mIndicatorClipRect.bottom = bottom;
     }
 
     /**
@@ -766,7 +975,31 @@ public abstract class MenuDrawer extends ViewGroup {
      *
      * @return The start position of the indicator.
      */
-    protected abstract int getIndicatorStartPos();
+    private int getIndicatorStartPos() {
+        switch (mPosition) {
+            case TOP:
+                return mIndicatorClipRect.left;
+            case RIGHT:
+                return mIndicatorClipRect.top;
+            case BOTTOM:
+                return mIndicatorClipRect.left;
+            default:
+                return mIndicatorClipRect.top;
+        }
+    }
+
+    /**
+     * Compute the touch area based on the touch mode.
+     */
+    protected void updateTouchAreaSize() {
+        if (mTouchMode == TOUCH_MODE_BEZEL) {
+            mTouchSize = mTouchBezelSize;
+        } else if (mTouchMode == TOUCH_MODE_FULLSCREEN) {
+            mTouchSize = getMeasuredWidth();
+        } else {
+            mTouchSize = 0;
+        }
+    }
 
     /**
      * Callback when each frame in the indicator animation should be drawn.
@@ -840,12 +1073,39 @@ public abstract class MenuDrawer extends ViewGroup {
         invalidate();
     }
 
+    protected GradientDrawable.Orientation getDropShadowOrientation() {
+        // Gets the orientation for the static and sliding drawer. The overlay drawer provides its own implementation.
+        switch (mPosition) {
+            case TOP:
+                return GradientDrawable.Orientation.BOTTOM_TOP;
+
+            case RIGHT:
+                return GradientDrawable.Orientation.LEFT_RIGHT;
+
+            case BOTTOM:
+                return GradientDrawable.Orientation.TOP_BOTTOM;
+
+            default:
+                return GradientDrawable.Orientation.RIGHT_LEFT;
+        }
+    }
+
     /**
      * Sets the color of the drop shadow.
      *
      * @param color The color of the drop shadow.
      */
-    public abstract void setDropShadowColor(int color);
+    public void setDropShadowColor(int color) {
+        GradientDrawable.Orientation orientation = getDropShadowOrientation();
+
+        final int endColor = color & 0x00FFFFFF;
+        mDropShadowDrawable = new GradientDrawable(orientation,
+                new int[] {
+                        color,
+                        endColor,
+                });
+        invalidate();
+    }
 
     /**
      * Sets the drawable of the drop shadow.
@@ -921,6 +1181,24 @@ public abstract class MenuDrawer extends ViewGroup {
         mMaxAnimationDuration = duration;
     }
 
+    /**
+     * Sets whether an overlay should be drawn when sliding the drawer.
+     *
+     * @param drawOverlay Whether an overlay should be drawn when sliding the drawer.
+     */
+    public void setDrawOverlay(boolean drawOverlay) {
+        mDrawOverlay = drawOverlay;
+    }
+
+    /**
+     * Gets whether an overlay is drawn when sliding the drawer.
+     *
+     * @return Whether an overlay is drawn when sliding the drawer.
+     */
+    public boolean getDrawOverlay() {
+        return mDrawOverlay;
+    }
+
     protected void updateUpContentDescription() {
         final int upContentDesc = isMenuVisible() ? mDrawerOpenContentDesc : mDrawerClosedContentDesc;
         if (mDrawerIndicatorEnabled && mActionBarHelper != null && upContentDesc != mCurrentUpContentDesc) {
@@ -946,9 +1224,13 @@ public abstract class MenuDrawer extends ViewGroup {
     public void setSlideDrawable(Drawable drawable) {
         mSlideDrawable = new SlideDrawable(drawable);
 
-        if (mActionBarHelper != null && mDrawerIndicatorEnabled) {
-            mActionBarHelper.setActionBarUpIndicator(mSlideDrawable,
-                    isMenuVisible() ? mDrawerOpenContentDesc : mDrawerClosedContentDesc);
+        if (mActionBarHelper != null) {
+            mActionBarHelper.setDisplayShowHomeAsUpEnabled(true);
+
+            if (mDrawerIndicatorEnabled) {
+                mActionBarHelper.setActionBarUpIndicator(mSlideDrawable,
+                        isMenuVisible() ? mDrawerOpenContentDesc : mDrawerClosedContentDesc);
+            }
         }
     }
 
@@ -961,7 +1243,6 @@ public abstract class MenuDrawer extends ViewGroup {
         if (mActionBarHelper == null) {
             mActionBarHelper = new ActionBarHelper(activity);
             mThemeUpIndicator = mActionBarHelper.getThemeUpIndicator();
-            mActionBarHelper.setDisplayShowHomeAsUpEnabled(true);
 
             if (mDrawerIndicatorEnabled) {
                 mActionBarHelper.setActionBarUpIndicator(mSlideDrawable,
@@ -988,6 +1269,15 @@ public abstract class MenuDrawer extends ViewGroup {
         } else {
             mActionBarHelper.setActionBarUpIndicator(mThemeUpIndicator, 0);
         }
+    }
+
+    /**
+     * Indicates whether the drawer indicator is currently enabled.
+     *
+     * @return Whether the drawer indicator is enabled.
+     */
+    public boolean isDrawerIndicatorEnabled() {
+        return mDrawerIndicatorEnabled;
     }
 
     /**
